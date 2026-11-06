@@ -8,8 +8,7 @@ program exemplo12(input,output);
 
         function f(z: integer): integer;
         begin
-        read(s);
-            if z < 0
+            if z<0
             then goto 200
             else
                 if z=0 then f:=2
@@ -19,7 +18,7 @@ program exemplo12(input,output);
     begin
         100: s:=f(t); t:=s;
              if t<x then goto 100;
-        200: x:=x+1
+        200: x:=x-1
     end (* p *);
 
     procedure r;
@@ -27,7 +26,7 @@ program exemplo12(input,output);
         procedure q;
             var y: integer;
         begin
-           read(y); p(y); write(y)
+            read(y); p(y); write(y)
         end (* q *);
 
     begin q end (* r *);

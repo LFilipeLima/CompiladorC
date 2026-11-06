@@ -35,9 +35,9 @@ static Simbolo *BuscarRotuloVisivel(char *nome)
     return NULL;
 }
 
-static void InserirSimboloOuErro(Simbolo simbolo)
+static void InserirSimboloOuErro(Simbolo simbolo, bool aumentarEscopo)
 {
-    if(!InserirSimbolo(&tabela, simbolo))
+    if(!InserirSimbolo(&tabela, simbolo, false))
     {
         printf(
             "Erro: identificador '%s' já declarado neste escopo. "
@@ -46,6 +46,9 @@ static void InserirSimboloOuErro(Simbolo simbolo)
         );
         exit(1);
     }
+    //tava dando problema na função p que tinha a função f dentro dela
+    //tem que aumentar o espoco após a inserção para p ainda continue chamando f
+    tabela.ScopoAtual++; 
 }
 
 static TipoSemantico ObterTipo(const char *nome)
@@ -718,7 +721,8 @@ void parametrosFormais()
             int primeiro = tabela.tamanhoLogico;
 
             InserirSimboloOuErro(
-                GerarSimbolo(palavraAtual, variavel, &tabela, NULL)
+                GerarSimbolo(palavraAtual, variavel, &tabela, NULL),
+                false
             );
 
             token = Analex();
@@ -773,7 +777,8 @@ void parametrosFormais()
                         variavel,
                         &tabela,
                         tabela.tabela[primeiro].valor
-                    )
+                    ),
+                    false
                 );
                 tabela.tabela[tabela.tamanhoLogico - 1].tipo =
                     tabela.tabela[primeiro].tipo;
@@ -799,7 +804,7 @@ void parametrosFormais()
 
             InserirSimboloOuErro(
                 GerarSimbolo(palavraAtual, funcao, &tabela, NULL)
-            );
+            , false);
 
             token = Analex();
 
@@ -818,7 +823,8 @@ void parametrosFormais()
                 }
 
                 InserirSimboloOuErro(
-                    GerarSimbolo(palavraAtual, funcao, &tabela, NULL)
+                    GerarSimbolo(palavraAtual, funcao, &tabela, NULL),
+                    false
                 );
 
                 token = Analex();
@@ -876,7 +882,7 @@ void parametrosFormais()
 
             InserirSimboloOuErro(
                 GerarSimbolo(palavraAtual, procedimento, &tabela, NULL)
-            );
+            , false);
 
             token = Analex();
 
@@ -895,7 +901,8 @@ void parametrosFormais()
                 }
 
                 InserirSimboloOuErro(
-                    GerarSimbolo(palavraAtual, procedimento, &tabela, NULL)
+                    GerarSimbolo(palavraAtual, procedimento, &tabela, NULL),
+                    false
                 );
 
                 token = Analex();
@@ -938,8 +945,7 @@ void AtribuirFuncao()
     int indiceFuncao = tabela.tamanhoLogico;
     Simbolo simbFunc = GerarSimbolo(palavraAtual, funcao, &tabela, NULL);
 
-    InserirSimboloOuErro(simbFunc);
-    tabela.ScopoAtual++;
+    InserirSimboloOuErro(simbFunc, true);
     //ImprimirTabela(&tabela);
     token = Analex();
 
@@ -1047,8 +1053,7 @@ void AtribuirProcedimento()
         palavraAtual, procedimento, &tabela, NULL
     );
 
-    InserirSimboloOuErro(simbProc);
-    tabela.ScopoAtual++;
+    InserirSimboloOuErro(simbProc, true);
     token = Analex();
 
     if(token == abreparenteses)
@@ -1124,7 +1129,8 @@ void AtribuirTipoImplicito()
     int primeiro = tabela.tamanhoLogico;
 
     InserirSimboloOuErro(
-        GerarSimbolo(palavraAtual, variavel, &tabela, NULL)
+        GerarSimbolo(palavraAtual, variavel, &tabela, NULL),
+        false
     );
 
     token = Analex();
@@ -1146,7 +1152,7 @@ void AtribuirTipoImplicito()
 
         InserirSimboloOuErro(
             GerarSimbolo(palavraAtual, variavel, &tabela, NULL)
-        );
+        , false);
 
         token = Analex();
     }
@@ -1213,7 +1219,8 @@ void AtribuirVariavel()
     int primeiro = tabela.tamanhoLogico;
 
     InserirSimboloOuErro(
-        GerarSimbolo(palavraAtual, variavel, &tabela, NULL)
+        GerarSimbolo(palavraAtual, variavel, &tabela, NULL),
+        false
     );
 
     token = Analex();
@@ -1271,7 +1278,7 @@ void Atribuirrotulo()
     }
 
     Simbolo simbolo = GerarSimbolo(palavraAtual, rotulo, &tabela, NULL);
-    InserirSimboloOuErro(simbolo);
+    InserirSimboloOuErro(simbolo, false);
     token = Analex();
 
     if(token != virgula && token != pontoevirgula)
@@ -1304,7 +1311,7 @@ void Atribuirrotulo()
             palavraAtual, rotulo, &tabela, NULL
         );
 
-        InserirSimboloOuErro(simbolo);
+        InserirSimboloOuErro(simbolo, false);
         token = Analex();
 
         if(token != virgula && token != pontoevirgula)
@@ -1383,7 +1390,8 @@ void verificaProgam()
     }
 
     InserirSimboloOuErro(
-        GerarSimbolo(palavraAtual, programa, &tabela, NULL)
+        GerarSimbolo(palavraAtual, programa, &tabela, NULL),
+        false
     );
 
     token = Analex();
@@ -1413,7 +1421,8 @@ void verificaProgam()
         }
 
         InserirSimboloOuErro(
-            GerarSimbolo(palavraAtual, identificador, &tabela, NULL)
+            GerarSimbolo(palavraAtual, identificador, &tabela, NULL),
+            false
         );
 
         token = Analex();

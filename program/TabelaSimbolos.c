@@ -5,8 +5,8 @@
 #include "AnalisadorLexico.h"
 #include "AnalisadorLexico.h"
 static TabelaSimbolos _AumentarTabela(TabelaSimbolos *tabela);
-bool InserirSimbolo();
 Simbolo GerarSimbolo();
+static void _CalcularDeslocamento(TabelaSimbolos *tabela, Simbolo *simbolo);
 void inicializarTabela(TabelaSimbolos *tabela){
     tabela->tamanhoLogico = 0;
     tabela->tamanho = 100;
@@ -14,18 +14,20 @@ void inicializarTabela(TabelaSimbolos *tabela){
     tabela->tabela = malloc(tabela->tamanho * sizeof(Simbolo));
     Simbolo read = GerarSimbolo("read",procedimento,tabela,NULL);
     Simbolo write = GerarSimbolo("write",procedimento,tabela,NULL);
-    InserirSimbolo(tabela,read);
-    InserirSimbolo(tabela,write);
+    InserirSimbolo(tabela, read, false);
+    InserirSimbolo(tabela, write, false);
     if(tabela->tabela == NULL)
         exit(-1);
 }
+
+
 
 Simbolo GerarSimbolo (char *nome, Token tipo,TabelaSimbolos *tabela, void *valor) {
     Simbolo simbolo;
     strcpy(simbolo.nome, nome);
     simbolo.token = tipo;
     simbolo.tipo = tipoIndefinido;
-    simbolo.escopo = tabela->ScopoAtual;
+    simbolo.escopo = -1;
     simbolo.valor = NULL;
     simbolo.mostrarValor = NULL;
     if(valor != NULL) {
@@ -39,13 +41,41 @@ Simbolo GerarSimbolo (char *nome, Token tipo,TabelaSimbolos *tabela, void *valor
 
 
 
-bool InserirSimbolo(TabelaSimbolos *tabela, Simbolo simboloASerInseriddo){
+bool InserirSimbolo(
+    TabelaSimbolos *tabela,
+    Simbolo simboloASerInseriddo,
+    bool aumentarEscopo
+){
     if(tabela->tamanhoLogico >= tabela->tamanho) {
         *tabela = _AumentarTabela(tabela);
     }
+        if(aumentarEscopo){
+            tabela->ScopoAtual++;
+        }
+        simboloASerInseriddo.escopo = tabela->ScopoAtual;
+        _CalcularDeslocamento(tabela, &simboloASerInseriddo);
         tabela->tabela[tabela->tamanhoLogico] = simboloASerInseriddo;
         tabela->tamanhoLogico++;
+
         return true;
+}
+
+void _CalcularDeslocamento(TabelaSimbolos *tabela, Simbolo *simbolo){
+    int deslocamento = 0;
+    for (int i = 0; i < tabela->tamanhoLogico; i++) {
+        if(CompareSimbolo(tabela->tabela[i], *simbolo) == 0){
+            break;
+        }
+        if (tabela->tabela[i].escopo == simbolo->escopo) {
+            deslocamento++;
+        }
+    }
+
+    simbolo->deslocamento = deslocamento;
+}
+
+int CompareSimbolo(Simbolo a, Simbolo b) {
+    return strcmp(a.nome, b.nome);
 }
 
 void *AtualizarSimbolo(TabelaSimbolos *tabela,Simbolo sim){
@@ -109,6 +139,8 @@ bool RemoverSimbolo(TabelaSimbolos *tabela, char *nome) {
     }
     return false;
 }
+
+
 
 TabelaSimbolos _AumentarTabela(TabelaSimbolos *tabela){
     tabela->tamanho *= 2;
