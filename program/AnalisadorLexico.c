@@ -3,6 +3,8 @@
 #include <ctype.h>
 #include "basics.h"
 #include "AnalisadorLexico.h"
+
+static int palavraExcedeuBuffer = 0;
 /*
 	Integrantes:
 Nome     RA
@@ -118,6 +120,7 @@ int retornarDelimitador(char letra) {
 int retornarProximaPalavra(FILE *arquivo) {
     int charact;
     int i = 0;
+    palavraExcedeuBuffer = 0;
 
     while (1) {
 
@@ -202,6 +205,8 @@ int retornarProximaPalavra(FILE *arquivo) {
 
             if (i < (int)sizeof(palavraAtual) - 1)
                 palavraAtual[i++] = charact;
+            else
+                palavraExcedeuBuffer = 1;
 
             if (charact == '\'' && !escapado)
                 break;
@@ -261,7 +266,10 @@ int retornarProximaPalavra(FILE *arquivo) {
             linha++;
         }
 
-        palavraAtual[i++] = charact;
+        if (i < (int)sizeof(palavraAtual) - 1)
+            palavraAtual[i++] = charact;
+        else
+            palavraExcedeuBuffer = 1;
     }
 
     palavraAtual[i] = '\0';
@@ -278,6 +286,9 @@ Token Analex()
 	if(!(retornarProximaPalavra(arquivo))){
 	    return finalDeArquivo;
 	}
+
+    if(palavraExcedeuBuffer)
+        return invalido;
 
 	if(strcmp(palavraAtual, "EOF") == 0) {
 		return finalDeArquivo;

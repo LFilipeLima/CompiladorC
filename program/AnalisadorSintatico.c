@@ -1,5 +1,7 @@
 #include "basics.h"
 #include "AnalisadorLexico.h"
+#include "AnalisadorSemantico.h"
+#include "GeradorCodigo.h"
 #include "TabelaSimbolos.h"
 #include <stdio.h>
 #include <string.h>
@@ -21,6 +23,75 @@ void verificaBloco();
 void VerificaComando();
 TipoSemantico VerificaExpressao();
 
+static int indiceRotinaAtual = -1;
+static int profundidadeBloco = 0;
+static bool codigoPrincipalIniciado = false;
+static char rotuloPrincipal[32];
+
+static void CriarRotuloRotina(const Simbolo *simbolo, char *destino, size_t tamanho)
+{
+    snprintf(destino, tamanho, "SUB_%lu", simbolo->identificadorCodigo);
+}
+
+static void CriarRotuloFonte(const Simbolo *simbolo, char *destino, size_t tamanho)
+{
+    snprintf(destino, tamanho, "SRC_%lu", simbolo->identificadorCodigo);
+}
+
+static int ContarPosicoesDoEscopo(int escopo, bool incluirParametrosPorValor)
+{
+    int quantidade = 0;
+    for(int i = 0; i < tabela.tamanhoLogico; i++)
+    {
+        Simbolo *simbolo = &tabela.tabela[i];
+        if(simbolo->escopo == escopo && simbolo->token == variavel &&
+           simbolo->modoPassagem != MODO_REFERENCIA &&
+           (incluirParametrosPorValor ||
+            simbolo->modoPassagem == MODO_NAO_APLICAVEL))
+            quantidade++;
+    }
+    return quantidade;
+}
+
+static bool RotuloExpressao(const Simbolo *simbolo)
+{
+    return simbolo != NULL && simbolo->token == funcao &&
+           simbolo->escopoCorpo >= 0 && simbolo->deslocamento != -1 &&
+           tabela.ScopoAtual >= simbolo->escopoCorpo;
+}
+
+static void EmitirComparacao(Token operador)
+{
+    switch(operador)
+    {
+        case igual: CMIG(); break;
+        case diferente: CMDG(); break;
+        case menor: CMME(); break;
+        case menorouigual: CMEG(); break;
+        case maior: CMMA(); break;
+        case maiorouigual: CMAG(); break;
+        default: break;
+    }
+}
+
+static long ValorCaractere(const char *literal)
+{
+    if(literal[1] != '\\')
+        return (unsigned char)literal[1];
+
+    switch(literal[2])
+    {
+        case 'n': return '\n';
+        case 'r': return '\r';
+        case 't': return '\t';
+        case '0': return '\0';
+        case 'b': return '\b';
+        case 'f': return '\f';
+        case 'v': return '\v';
+        default: return (unsigned char)literal[2];
+    }
+}
+
 
 static Simbolo *BuscarRotuloVisivel(char *nome)
 {
@@ -37,55 +108,12 @@ static Simbolo *BuscarRotuloVisivel(char *nome)
 
 static void InserirSimboloOuErro(Simbolo simbolo, bool aumentarEscopo)
 {
-    if(!InserirSimbolo(&tabela, simbolo, false))
+    if(!InserirSimbolo(&tabela, simbolo, aumentarEscopo))
     {
         printf(
             "Erro: identificador '%s' já declarado neste escopo. "
             "Linha: %u, função: %s()\n",
             simbolo.nome, linha, __func__
-        );
-        exit(1);
-    }
-    //tava dando problema na função p que tinha a função f dentro dela
-    //tem que aumentar o espoco após a inserção para p ainda continue chamando f
-    tabela.ScopoAtual++; 
-}
-
-static TipoSemantico ObterTipo(const char *nome)
-{
-    if(strcmp(nome, "integer") == 0)
-        return tipoInteger;
-
-    if(strcmp(nome, "double") == 0)
-        return tipoDouble;
-
-    if(strcmp(nome, "char") == 0)
-        return tipoChar;
-
-    return tipoIndefinido;
-}
-
-static const char *NomeTipo(TipoSemantico tipoAtual)
-{
-    switch(tipoAtual)
-    {
-        case tipoInteger: return "integer";
-        case tipoDouble: return "double";
-        case tipoChar: return "char";
-        case tipoBooleano: return "booleano";
-        default: return "indefinido";
-    }
-}
-
-static void CompararTipos(TipoSemantico tipoAtual, const Simbolo *simbolo)
-{
-    if(tipoAtual == tipoIndefinido || tipoAtual != simbolo->tipo)
-    {
-        printf(
-            "Erro semântico: tipos incompatíveis para '%s': "
-            "esperado %s, recebido %s. Linha: %u, função: %s()\n",
-            simbolo->nome, NomeTipo(simbolo->tipo), NomeTipo(tipoAtual),
-            linha, __func__
         );
         exit(1);
     }
@@ -96,16 +124,150 @@ bool verificaType(Token token)
     return token == identificador && ObterTipo(palavraAtual) != tipoIndefinido;
 }
 
+static void EmitirChamada(Simbolo *simbolo);
+
+static void EmitirInicioRotina(int indice)
+{
+    Simbolo *rotina = &tabela.tabela[indice];
+    char rotulo[40];
+    char corpo[40];
+    CriarRotuloRotina(rotina, rotulo, sizeof(rotulo));
+    snprintf(corpo, sizeof(corpo), "BODY_%lu", rotina->identificadorCodigo);
+    NADA(rotulo);
+    ENPR(rotina->escopoCorpo);
+    DSVR(corpo);
+}
+
+static void EmitirCorpoRotina(int indice)
+{
+    Simbolo *rotina = &tabela.tabela[indice];
+    char corpo[40];
+    snprintf(corpo, sizeof(corpo), "BODY_%lu", rotina->identificadorCodigo);
+    NADA(corpo);
+    AMEM(ContarPosicoesDoEscopo(rotina->escopoCorpo, true));
+    int quantidadeValor = 0;
+    for(int i = 0; i < rotina->quantidadeParametros; i++)
+        quantidadeValor += rotina->parametros[i].modoPassagem == MODO_VALOR;
+    if(quantidadeValor > 0)
+        IPVL(rotina->escopoCorpo, quantidadeValor);
+}
+
+static void EmitirChamada(Simbolo *simbolo)
+{
+    bool leitura = simbolo->intrinseco && strcmp(simbolo->nome, "read") == 0;
+    bool escrita = simbolo->intrinseco && strcmp(simbolo->nome, "write") == 0;
+    int indiceParametro = 0;
+    if(simbolo->token == funcao)
+        AMEM(1);
+    token = Analex();
+
+    while(token != fechaparenteses)
+    {
+        if(token == finalDeArquivo)
+        {
+            printf("Erro: Esperava-se um fechaparenteses. Linha: %u, função: %s()\n",
+                   linha, __func__);
+            exit(-1);
+        }
+
+        if(leitura)
+        {
+            if(token != identificador)
+            {
+                printf("Erro: read espera identificadores. Linha: %u, função: %s()\n",
+                       linha, __func__);
+                exit(-1);
+            }
+            Simbolo *destino = BuscarSimbolo(&tabela, palavraAtual);
+            if(destino == NULL || destino->token != variavel)
+            {
+                printf("Erro: identificador '%s' não é uma variável legível. Linha: %u\n",
+                       palavraAtual, linha);
+                exit(-1);
+            }
+            LEIT();
+            int nivel = destino->escopo;
+            if(destino->modoPassagem == MODO_REFERENCIA)
+                ARMI(nivel, destino->deslocamento);
+            else
+                ARMZ(nivel, destino->deslocamento);
+            token = Analex();
+        }
+        else if(!escrita && indiceParametro < simbolo->quantidadeParametros &&
+                simbolo->parametros[indiceParametro].modoPassagem == MODO_REFERENCIA)
+        {
+            if(token != identificador)
+            {
+                printf("Erro semântico: parâmetro por referência exige variável. Linha: %u\n",
+                       linha);
+                exit(1);
+            }
+            char nome[sizeof(palavraAtual)];
+            strcpy(nome, palavraAtual);
+            Simbolo *atual = BuscarSimbolo(&tabela, nome);
+            if(atual == NULL || atual->token != variavel ||
+               atual->tipo != simbolo->parametros[indiceParametro].tipo)
+            {
+                printf("Erro semântico: argumento incompatível para '%s'. Linha: %u\n",
+                       simbolo->nome, linha);
+                exit(1);
+            }
+            EmitirReferenciaSimbolo(nome, 1);
+            token = Analex();
+        }
+        else
+        {
+            TipoSemantico tipoArgumento = VerificaExpressao();
+            if(!escrita && indiceParametro < simbolo->quantidadeParametros &&
+               tipoArgumento != simbolo->parametros[indiceParametro].tipo)
+            {
+                printf("Erro semântico: argumento incompatível para '%s'. Linha: %u\n",
+                       simbolo->nome, linha);
+                exit(1);
+            }
+            if(escrita)
+                IMPR();
+        }
+
+        indiceParametro++;
+        if(token == virgula)
+            token = Analex();
+        else if(token != fechaparenteses)
+        {
+            printf("Erro: Esperava-se uma vírgula ou fechaparenteses. Linha: %u, função: %s()\n",
+                   linha, __func__);
+            exit(-1);
+        }
+    }
+
+    if(!leitura && !escrita && indiceParametro != simbolo->quantidadeParametros)
+    {
+        printf("Erro semântico: quantidade de parâmetros incompatível para '%s'. Linha: %u\n",
+               simbolo->nome, linha);
+        exit(1);
+    }
+
+    token = Analex();
+    if(!leitura && !escrita)
+    {
+        char rotulo[40];
+        CriarRotuloRotina(simbolo, rotulo, sizeof(rotulo));
+        CHPR(rotulo, simbolo->escopoCorpo);
+    }
+}
+
 TipoSemantico Fator()
 {
     if(token == numero)
     {
+        CRCT(strtol(palavraAtual, NULL, 10));
         token = Analex();
         return tipoInteger;
     }
 
     if(token == caractere)
     {
+        CRCT(ValorCaractere(palavraAtual));
         token = Analex();
         return tipoChar;
     }
@@ -114,6 +276,7 @@ TipoSemantico Fator()
     {
         token = Analex();
         Fator();
+        NEGA();
         return tipoBooleano;
     }
 
@@ -164,30 +327,7 @@ TipoSemantico Fator()
                 exit(-1);
             }
 
-            token = Analex();
-
-            if(token != fechaparenteses)
-            {
-                VerificaExpressao();
-
-                while(token == virgula)
-                {
-                    token = Analex();
-                    VerificaExpressao();
-                }
-            }
-
-            if(token != fechaparenteses)
-            {
-                printf(
-                    "Erro: Esperava-se um fechaparenteses. "
-                    "Linha: %u, função: %s()\n",
-                    linha, __func__
-                );
-                exit(-1);
-            }
-
-            token = Analex();
+            EmitirChamada(simbolo);
             return simbolo->tipo;
         }
 
@@ -202,6 +342,10 @@ TipoSemantico Fator()
                 );
                 exit(-1);
             }
+
+            printf("Erro semântico: acesso indexado não é suportado pelo gerador MEPA. Linha: %u\n",
+                   linha);
+            exit(1);
 
             token = Analex();
             VerificaExpressao();
@@ -238,6 +382,12 @@ TipoSemantico Fator()
             exit(-1);
         }
 
+        if(simbolo->token == variavel)
+            EmitirReferenciaSimbolo(simbolo->nome, 0);
+        else if(RotuloExpressao(simbolo))
+        {
+            CRVL(simbolo->escopoCorpo, simbolo->deslocamento);
+        }
         return simbolo->tipo;
     }
 
@@ -286,9 +436,14 @@ TipoSemantico Termo()
 
         TipoSemantico tipoFator = Fator();
         if(operador == e)
+        {
+            CONJ();
             tipoAtual = tipoBooleano;
+        }
         else if(tipoAtual != tipoFator)
             tipoAtual = tipoIndefinido;
+        if(operador == vezes) MULT();
+        else if(operador == dividir) DIVI();
     }
 
     return tipoAtual;
@@ -296,6 +451,7 @@ TipoSemantico Termo()
 
 TipoSemantico ExpressaoSimples()
 {
+    Token sinal = token;
     if(token == mais || token == menos)
     {
         token = Analex();
@@ -315,6 +471,7 @@ TipoSemantico ExpressaoSimples()
     }
 
     TipoSemantico tipoAtual = Termo();
+    if(sinal == menos) INVR();
 
     while(token == mais || token == menos || token == ou)
     {
@@ -336,9 +493,14 @@ TipoSemantico ExpressaoSimples()
 
         TipoSemantico tipoTermo = Termo();
         if(operador == ou)
+        {
+            DISJ();
             tipoAtual = tipoBooleano;
+        }
         else if(tipoAtual != tipoTermo)
             tipoAtual = tipoIndefinido;
+        if(operador == mais) SOMA();
+        else if(operador == menos) SUBT();
     }
 
     return tipoAtual;
@@ -360,8 +522,10 @@ TipoSemantico VerificaExpressao()
 
     if(EhOperadorRelacional(token))
     {
+        Token operador = token;
         token = Analex();
         ExpressaoSimples();
+        EmitirComparacao(operador);
         return tipoBooleano;
     }
 
@@ -383,8 +547,10 @@ void VerificaCondicao()
         exit(-1);
     }
 
+    Token operador = token;
     token = Analex();
     ExpressaoSimples();
+    EmitirComparacao(operador);
 }
 
 void VerificaComandoSemRotulo()
@@ -416,6 +582,10 @@ void VerificaComandoSemRotulo()
                 );
                 exit(-1);
             }
+
+            printf("Erro semântico: atribuição indexada não é suportada pelo gerador MEPA. Linha: %u\n",
+                   linha);
+            exit(1);
             
             token = Analex();
            
@@ -468,11 +638,19 @@ void VerificaComandoSemRotulo()
                 exit(-1);
             }
 
-            CompararTipos(tipoAtual, simboloAtual);
+            CompararTipos(tipoAtual, simboloAtual, linha, "CompararTipos");
             //atualizar
             Simbolo atualizado = *simboloAtual;
             //atualizado.valor = palavraAtual;
             AtualizarSimbolo(&tabela, atualizado);
+            if(simboloAtual->token == funcao && RotuloExpressao(simboloAtual))
+            {
+                ARMZ(simboloAtual->escopoCorpo, simboloAtual->deslocamento);
+            }
+            else if(simbolo->modoPassagem == MODO_REFERENCIA)
+                ARMI(simbolo->escopo, simbolo->deslocamento);
+            else
+                ARMZ(simbolo->escopo, simbolo->deslocamento);
         }
         else if(token == abreparenteses)
         {
@@ -485,31 +663,19 @@ void VerificaComandoSemRotulo()
                 );
                 exit(-1);
             }
-
-            token = Analex();
-
-            if(token != fechaparenteses)
+            EmitirChamada(simbolo);
+        }
+        else if(simbolo->token == procedimento)
+        {
+            if(simbolo->quantidadeParametros != 0)
             {
-                VerificaExpressao();
-
-                while(token == virgula)
-                {
-                    token = Analex();
-                    VerificaExpressao();
-                }
+                printf("Erro semântico: procedimento '%s' exige parâmetros. Linha: %u\n",
+                       simbolo->nome, linha);
+                exit(1);
             }
-
-            if(token != fechaparenteses)
-            {
-                printf(
-                    "Erro: Esperava-se um fechaparenteses. "
-                    "Linha: %u, função: %s()\n",
-                    linha, __func__
-                );
-                exit(-1);
-            }
-
-            token = Analex();
+            char rotulo[40];
+            CriarRotuloRotina(simbolo, rotulo, sizeof(rotulo));
+            CHPR(rotulo, simbolo->escopoCorpo);
         }
     }
     else if(token == vapara)
@@ -535,10 +701,15 @@ void VerificaComandoSemRotulo()
             exit(-1);
         }
 
+        Simbolo *destino = BuscarRotuloVisivel(palavraAtual);
+        char rotulo[40];
+        CriarRotuloFonte(destino, rotulo, sizeof(rotulo));
+        DSVR(rotulo);
         token = Analex();
     }
     else if(token == inicio)
     {
+        profundidadeBloco++;
         VerificaComando();
 
         while(token != fim)
@@ -559,11 +730,23 @@ void VerificaComandoSemRotulo()
         }
 
         token = Analex();
+        profundidadeBloco--;
+        if(profundidadeBloco == 0 && indiceRotinaAtual >= 0)
+        {
+            Simbolo *rotina = &tabela.tabela[indiceRotinaAtual];
+            DMEM(ContarPosicoesDoEscopo(rotina->escopoCorpo, true));
+            RTPR(rotina->escopoCorpo, rotina->quantidadeParametros);
+        }
     }
     else if(token == se)
     {
         token = Analex();
         VerificaCondicao();
+
+        unsigned long identificadorRotulo = GerarRotulo();
+        char rotuloSenao[32], rotuloFim[32];
+        snprintf(rotuloSenao, sizeof(rotuloSenao), "L%lu", identificadorRotulo);
+        snprintf(rotuloFim, sizeof(rotuloFim), "L%lu", GerarRotulo());
 
         if(token != entao)
         {
@@ -575,16 +758,26 @@ void VerificaComandoSemRotulo()
         }
 
         token = Analex();
+        DSVF(rotuloSenao);
         VerificaComandoSemRotulo();
 
         if(token == senao)
         {
+            DSVR(rotuloFim);
+            NADA(rotuloSenao);
             token = Analex();
             VerificaComandoSemRotulo();
+            NADA(rotuloFim);
         }
+        else
+            NADA(rotuloSenao);
     }
     else if(token == enquanto)
     {
+        char rotuloInicio[32], rotuloFim[32];
+        snprintf(rotuloInicio, sizeof(rotuloInicio), "L%lu", GerarRotulo());
+        snprintf(rotuloFim, sizeof(rotuloFim), "L%lu", GerarRotulo());
+        NADA(rotuloInicio);
         token = Analex();
         VerificaCondicao();
 
@@ -598,7 +791,10 @@ void VerificaComandoSemRotulo()
         }
 
         token = Analex();
+        DSVF(rotuloFim);
         VerificaComandoSemRotulo();
+        DSVR(rotuloInicio);
+        NADA(rotuloFim);
     }
     else
     {
@@ -637,7 +833,8 @@ void VerificaComando()
 
     if(token == numero)
     {
-        if(BuscarRotuloVisivel(palavraAtual) == NULL)
+        Simbolo *simboloRotulo = BuscarRotuloVisivel(palavraAtual);
+        if(simboloRotulo == NULL)
         {
             printf(
                 "Erro: rótulo '%s' não declarado. "
@@ -646,6 +843,10 @@ void VerificaComando()
             );
             exit(-1);
         }
+
+        char rotulo[40];
+        CriarRotuloFonte(simboloRotulo, rotulo, sizeof(rotulo));
+        NADA(rotulo);
 
         token = Analex();
 
@@ -701,8 +902,10 @@ void parametrosFormais()
             exit(-1);
         }
 
+        ModoPassagem modoFormal = MODO_VALOR;
         if(token == variavel)
         {
+            modoFormal = MODO_REFERENCIA;
             token = Analex();
 
             if(token != identificador)
@@ -720,10 +923,11 @@ void parametrosFormais()
         {
             int primeiro = tabela.tamanhoLogico;
 
-            InserirSimboloOuErro(
-                GerarSimbolo(palavraAtual, variavel, &tabela, NULL),
-                false
+            Simbolo simboloFormal = GerarSimbolo(
+                palavraAtual, variavel, &tabela, NULL
             );
+            simboloFormal.modoPassagem = modoFormal;
+            InserirSimboloOuErro(simboloFormal, false);
 
             token = Analex();
 
@@ -755,6 +959,13 @@ void parametrosFormais()
 
             strcpy(tabela.tabela[primeiro].valor, palavraAtual);
             tabela.tabela[primeiro].tipo = ObterTipo(palavraAtual);
+            if(indiceRotinaAtual >= 0 && !RegistrarParametroFormal(
+                &tabela.tabela[indiceRotinaAtual],
+                tabela.tabela[primeiro].tipo,
+                modoFormal,
+                tabela.tabela[primeiro].deslocamento
+            ))
+                exit(EXIT_FAILURE);
             token = Analex();
 
             while(token == virgula)
@@ -771,17 +982,23 @@ void parametrosFormais()
                     exit(-1);
                 }
 
-                InserirSimboloOuErro(
-                    GerarSimbolo(
-                        palavraAtual,
-                        variavel,
-                        &tabela,
-                        tabela.tabela[primeiro].valor
-                    ),
-                    false
+                Simbolo simboloFormal = GerarSimbolo(
+                    palavraAtual,
+                    variavel,
+                    &tabela,
+                    tabela.tabela[primeiro].valor
                 );
+                simboloFormal.modoPassagem = modoFormal;
+                InserirSimboloOuErro(simboloFormal, false);
                 tabela.tabela[tabela.tamanhoLogico - 1].tipo =
                     tabela.tabela[primeiro].tipo;
+                if(indiceRotinaAtual >= 0 && !RegistrarParametroFormal(
+                    &tabela.tabela[indiceRotinaAtual],
+                    tabela.tabela[primeiro].tipo,
+                    modoFormal,
+                    tabela.tabela[tabela.tamanhoLogico - 1].deslocamento
+                ))
+                    exit(EXIT_FAILURE);
 
                 token = Analex();
             }
@@ -928,6 +1145,52 @@ void AtribuirParametosFormais()
     token = Analex();
 }
 
+static void FinalizarAssinaturaRotina(int indiceRotina)
+{
+    Simbolo *rotina = &tabela.tabela[indiceRotina];
+    bool temValor = false;
+    bool temReferencia = false;
+    int indiceFormal = 0;
+
+    for(int i = 0; i < tabela.tamanhoLogico; i++)
+    {
+        Simbolo *formal = &tabela.tabela[i];
+        if(formal->escopo != rotina->escopoCorpo)
+            continue;
+        if(formal->token == funcao || formal->token == procedimento)
+        {
+            fprintf(stderr,
+                "Erro semântico: parâmetros de rotina como argumento ainda não são gerados. Linha: %u\n",
+                linha);
+            exit(EXIT_FAILURE);
+        }
+        if(formal->token != variavel || formal->modoPassagem == MODO_NAO_APLICAVEL)
+            continue;
+
+        temValor |= formal->modoPassagem == MODO_VALOR;
+        temReferencia |= formal->modoPassagem == MODO_REFERENCIA;
+        if(formal->modoPassagem == MODO_REFERENCIA)
+            /* Argumentos ficam negativos em relação a D[k], abaixo de retorno e display. */
+            formal->deslocamento = -(rotina->quantidadeParametros + 2 - indiceFormal);
+        rotina->parametros[indiceFormal].deslocamento = formal->deslocamento;
+        indiceFormal++;
+    }
+
+    if(temValor && temReferencia)
+    {
+        fprintf(stderr,
+            "Erro semântico: a convenção IPVL do projeto não representa modos mistos na mesma rotina. Linha: %u\n",
+            linha);
+        exit(EXIT_FAILURE);
+    }
+
+    if(rotina->token == funcao)
+    {
+        /* A chamada reserva o resultado antes dos argumentos; D[k] fica n+3 posições acima. */
+        rotina->deslocamento = -(rotina->quantidadeParametros + 3);
+    }
+}
+
 void AtribuirFuncao()
 {
     token = Analex();
@@ -943,10 +1206,13 @@ void AtribuirFuncao()
     }
 
     int indiceFuncao = tabela.tamanhoLogico;
+    int indiceRotinaAnterior = indiceRotinaAtual;
     Simbolo simbFunc = GerarSimbolo(palavraAtual, funcao, &tabela, NULL);
 
     InserirSimboloOuErro(simbFunc, true);
-    //ImprimirTabela(&tabela);
+    tabela.tabela[indiceFuncao].identificadorCodigo = GerarRotulo();
+    indiceRotinaAtual = indiceFuncao;
+    tabela.tabela[indiceFuncao].escopoCorpo = tabela.ScopoAtual;
     token = Analex();
 
     if(token != abreparenteses && token != doispontos)
@@ -964,6 +1230,8 @@ void AtribuirFuncao()
     {
         AtribuirParametosFormais();
     }
+
+    FinalizarAssinaturaRotina(indiceFuncao);
 
     if(token != doispontos)
     {
@@ -1018,6 +1286,7 @@ void AtribuirFuncao()
         exit(1);
     }
 
+    EmitirInicioRotina(indiceFuncao);
     verificaBloco();
 
     if(token != pontoevirgula)
@@ -1033,6 +1302,7 @@ void AtribuirFuncao()
 
     token = Analex();
     RemoverScopo(&tabela, tabela.ScopoAtual);
+    indiceRotinaAtual = indiceRotinaAnterior;
 }
 
 void AtribuirProcedimento()
@@ -1049,17 +1319,24 @@ void AtribuirProcedimento()
         exit(1);
     }
 
+    int indiceRotinaAnterior = indiceRotinaAtual;
+    int indiceProcedimento = tabela.tamanhoLogico;
     Simbolo simbProc = GerarSimbolo(
         palavraAtual, procedimento, &tabela, NULL
     );
 
     InserirSimboloOuErro(simbProc, true);
+    tabela.tabela[indiceProcedimento].identificadorCodigo = GerarRotulo();
+    indiceRotinaAtual = indiceProcedimento;
+    tabela.tabela[indiceProcedimento].escopoCorpo = tabela.ScopoAtual;
     token = Analex();
 
     if(token == abreparenteses)
     {
         AtribuirParametosFormais();
     }
+
+    FinalizarAssinaturaRotina(indiceProcedimento);
 
     if(token != pontoevirgula)
     {
@@ -1084,6 +1361,7 @@ void AtribuirProcedimento()
         exit(1);
     }
 
+    EmitirInicioRotina(indiceProcedimento);
     verificaBloco();
 
     if(token != pontoevirgula)
@@ -1099,6 +1377,7 @@ void AtribuirProcedimento()
 
     token = Analex();
     RemoverScopo(&tabela, tabela.ScopoAtual);
+    indiceRotinaAtual = indiceRotinaAnterior;
 }
 
 void AtribuirTipoImplicito()
@@ -1251,7 +1530,7 @@ void AtribuirVariavel()
 
     strcpy(tabela.tabela[primeiro].valor, palavraAtual);
     tabela.tabela[primeiro].tipo = ObterTipo(palavraAtual);
-    CompararTipos(tipoAtual, &tabela.tabela[primeiro]);
+    CompararTipos(tipoAtual, &tabela.tabela[primeiro], linha, "CompararTipos");
     token = Analex();
 
     if(token != pontoevirgula)
@@ -1279,6 +1558,7 @@ void Atribuirrotulo()
 
     Simbolo simbolo = GerarSimbolo(palavraAtual, rotulo, &tabela, NULL);
     InserirSimboloOuErro(simbolo, false);
+    tabela.tabela[tabela.tamanhoLogico - 1].identificadorCodigo = GerarRotulo();
     token = Analex();
 
     if(token != virgula && token != pontoevirgula)
@@ -1312,6 +1592,7 @@ void Atribuirrotulo()
         );
 
         InserirSimboloOuErro(simbolo, false);
+        tabela.tabela[tabela.tamanhoLogico - 1].identificadorCodigo = GerarRotulo();
         token = Analex();
 
         if(token != virgula && token != pontoevirgula)
@@ -1328,6 +1609,7 @@ void Atribuirrotulo()
 
 void verificaBloco()
 {
+    bool corpoEmitido = false;
     while(EhBloco())
     {
         while(token == rotulo)
@@ -1360,6 +1642,18 @@ void verificaBloco()
 
         if(token == inicio)
         {
+            if(!corpoEmitido)
+            {
+                if(indiceRotinaAtual >= 0)
+                    EmitirCorpoRotina(indiceRotinaAtual);
+                else if(!codigoPrincipalIniciado)
+                {
+                    NADA(rotuloPrincipal);
+                    AMEM(ContarPosicoesDoEscopo(0, false));
+                    codigoPrincipalIniciado = true;
+                }
+                corpoEmitido = true;
+            }
             VerificaComandoSemRotulo();
         }
     }
@@ -1477,10 +1771,31 @@ void verificaProgam()
 int main()
 {
     arquivo = fopen("arq.txt", "r");
+    if(arquivo == NULL)
+    {
+        fprintf(stderr, "Erro: não foi possível abrir arq.txt.\n");
+        return EXIT_FAILURE;
+    }
+
+    arquivoCodigo = fopen("arq.mepa", "w");
+    if(arquivoCodigo == NULL)
+    {
+        fprintf(stderr, "Erro: não foi possível criar arq.mepa.\n");
+        fclose(arquivo);
+        return EXIT_FAILURE;
+    }
+
+    INPP();
+    snprintf(rotuloPrincipal, sizeof(rotuloPrincipal), "MAIN_%lu", GerarRotulo());
+    DSVR(rotuloPrincipal);
     token = Analex();
 
     inicializarTabela(&tabela);
+    tabelaCodigo = &tabela;
     verificaProgam();
+    PARA();
+    fclose(arquivoCodigo);
+    arquivoCodigo = NULL;
 
     ImprimirTabela(&tabela);
     RemoverScopo(&tabela, tabela.ScopoAtual);

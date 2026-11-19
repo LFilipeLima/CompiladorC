@@ -30,6 +30,8 @@ void CRVL(int nivelLexico, int deslocamento);
 void ARMZ(int nivelLexico, int deslocamento);
 /* Emite CREN para empilhar o endereço da variável indicada (parâmetro por referência). */
 void CREN(int nivelLexico, int deslocamento);
+/* Emite CRVI para carregar o valor apontado por um parâmetro por referência. */
+void CRVI(int nivelLexico, int deslocamento);
 /* Emite ARMI para armazenar o topo no endereço indireto indicado pelo parâmetro. */
 void ARMI(int nivelLexico, int deslocamento);
 
@@ -66,7 +68,7 @@ void DISJ(void);
 
 /* Emite uma declaração de rótulo para marcar a posição atual do código. */
 void NADA(const char *rotulo);
-/* Emite DSVR para saltar incondicionalmente ao rótulo informado. */
+/* Mantém DSVR na API C e emite DSVS no dialeto MEPA do projeto. */
 void DSVR(const char *rotulo);
 /* Emite DSVF para saltar ao rótulo informado quando o topo for falso. */
 void DSVF(const char *rotulo);
@@ -75,6 +77,10 @@ unsigned long GerarRotulo(void);
 
 /* Emite CHPR para chamar uma rotina no nível léxico informado. */
 void CHPR(const char *rotulo, int nivelLexico);
+/* Emite ENPR para iniciar um quadro de sub-rotina no nível informado. */
+void ENPR(int nivelLexico);
+/* Emite IPVL para inicializar os parâmetros por valor do quadro. */
+void IPVL(int nivelLexico, int quantidadeParametros);
 /* Emite RTPR para retornar e remover os parâmetros indicados da pilha. */
 void RTPR(int nivelLexico, int quantidadeParametros);
 
